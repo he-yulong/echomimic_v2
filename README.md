@@ -12,8 +12,8 @@ Terminal Technology Department, Alipay, Ant Group.
 </div>
 
 <p align='center'>
-    <sup>1</sup>Core contributor&emsp;
-    <sup>2</sup>Corresponding author
+    <sup>1</sup>Core Contributor&emsp;
+    <sup>2</sup>Corresponding Authors
 </p>
 <div align='center'>
     <a href='https://antgroup.github.io/ai/echomimic_v2/'><img src='https://img.shields.io/badge/Project-Page-blue'></a>
@@ -285,6 +285,7 @@ If you find our work useful for your research, please consider citing the paper 
 
 ## &#x1F31F; Star History
 [![Star History Chart](https://api.star-history.com/svg?repos=antgroup/echomimic_v2&type=Date)](https://star-history.com/#antgroup/echomimic_v2&Date)
+
 
 
 
