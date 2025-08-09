@@ -36,6 +36,7 @@ Terminal Technology Department, Alipay, Ant Group.
 * EchoMimicV3: 1.3B Parameters are All You Need for Unified Multi-Modal and Multi-Task Human Animation. [GitHub](https://github.com/antgroup/echomimic_v3)
 
 ## &#x1F4E3; Updates
+* [2025.08.09] 🔥🔥 We update the EchoMimicV3 and release the [code](https://github.com/antgroup/echomimic_v3).
 * [2025.02.27] 🔥 EchoMimicV2 is accepted by CVPR 2025.
 * [2025.01.16] 🔥 Please check out the [discussions](https://github.com/antgroup/echomimic_v2/discussions) to learn how to start EchoMimicV2.
 * [2025.01.16] 🚀🔥 [GradioUI for Accelerated EchoMimicV2](https://github.com/antgroup/echomimic_v2/blob/main/app_acc.py) is now available.
@@ -285,6 +286,7 @@ If you find our work useful for your research, please consider citing the paper 
 
 ## &#x1F31F; Star History
 [![Star History Chart](https://api.star-history.com/svg?repos=antgroup/echomimic_v2&type=Date)](https://star-history.com/#antgroup/echomimic_v2&Date)
+
 
 
 
