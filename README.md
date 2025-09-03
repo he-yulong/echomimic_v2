@@ -198,6 +198,7 @@ git lfs install
 git clone https://huggingface.co/BadToBest/EchoMimicV2 pretrained_weights
 git clone https://huggingface.co/stabilityai/sd-vae-ft-mse pretrained_weights/sd-vae-ft-mse
 git clone https://huggingface.co/lambdalabs/sd-image-variations-diffusers pretrained_weights/sd-image-variations-diffusers
+git clone https://huggingface.co/yzd-v/DWPose pretrained_weights/DWPose  # optional
 ```
 
 The **pretrained_weights** is organized as follows.

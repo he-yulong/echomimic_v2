@@ -1,3 +1,5 @@
+.idea
+assets/halfbody_demo/video
 /pretrained_weights
 /outputs
 __pycache__
