@@ -2,7 +2,6 @@ from typing import Tuple
 
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.nn.init as init
 from diffusers.models.modeling_utils import ModelMixin
 
 from src.models.motion_module import zero_module

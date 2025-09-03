@@ -486,7 +486,7 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
             context_frames
         )
         
-        pose_enocder_tensor = self.pose_encoder(poses_tensor)
+        pose_encoder_tensor = self.pose_encoder(poses_tensor)
         
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
@@ -570,7 +570,7 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
                     audio_latents_cond = torch.cat([audio_fea_final[:, c] for c in new_context]).to(device)
                                         
                     audio_latents = torch.cat([torch.zeros_like(audio_latents_cond), audio_latents_cond], 0)
-                    pose_latents_cond = torch.cat([pose_enocder_tensor[:, :, c] for c in new_context]).to(device)
+                    pose_latents_cond = torch.cat([pose_encoder_tensor[:, :, c] for c in new_context]).to(device)
                     pose_latents = torch.cat([torch.zeros_like(pose_latents_cond), pose_latents_cond], 0)
                     
                     latent_model_input = self.scheduler.scale_model_input(
