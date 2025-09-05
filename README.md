@@ -235,17 +235,22 @@ python infer_acc.py --config='./configs/prompts/infer_acc.yaml'
 ```
 
 ### EMTD Dataset
+
+```
+cd EMTD_dataset
+```
+
 Download dataset:
 ```bash
-python ./EMTD_dataset/download.py
+python download.py
 ```
 Slice dataset:
 ```bash
-bash ./EMTD_dataset/slice.sh
+python slice_dataset.py
 ```
 Process dataset:
 ```bash
-python ./EMTD_dataset/preprocess.py
+python preprocess.py
 ```
 Make sure to check out the [discussions](https://github.com/antgroup/echomimic_v2/discussions) to learn how to start the inference.
 

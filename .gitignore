@@ -1,3 +1,7 @@
+EMTD_dataset/temp_24fps
+EMTD_dataset/temp
+EMTD_dataset/processed
+EMTD_dataset/image_audio_features
 EMTD_dataset/ori_video_dir
 EMTD_dataset/ori_video_dir_segs
 .ipynb_checkpoints

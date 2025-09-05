@@ -19,7 +19,7 @@ from multiprocessing.pool import ThreadPool
 # Make all paths in this script relative to the script folder (…\EMTD_dataset)
 BASE = Path(__file__).resolve().parent
 base_dir = str(BASE) + os.sep  # replaces your previous base_dir="./"
-tasks = ["ori_video_dir_segs"]
+tasks = ["temp"]
 
 process_num = 800  # 1266
 

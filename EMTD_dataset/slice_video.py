@@ -10,7 +10,6 @@ from multiprocessing import Pool
 def split_video(info):
     input_fp, star_timecode, end_timecode, output_fp = info
     try:
-        # 确保输出目录存在
         if not os.path.exists(os.path.dirname(output_fp)):
             os.makedirs(os.path.dirname(output_fp), exist_ok=True)
         cap = cv2.VideoCapture(input_fp)
@@ -31,10 +30,9 @@ def split_video(info):
 
 
 if __name__ == '__main__':
-
-    ori_video_dir = "EMTD_dataset/"
+    ori_video_dir = "ori_video_dir/"
     output_dir = "temp"
-    df = pd.read_csv("EMTD_dataset_original_list.txt")
+    df = pd.read_csv("echomimicv2_benchmark_url+start_timecode+end_timecode.txt")
     infos = np.array(df).tolist()
 
     input_video_paths = []
