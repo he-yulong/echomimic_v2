@@ -1,12 +1,20 @@
 import os
-
+from pathlib import Path
 import numpy as np
 import torch
 
 from .wholebody import Wholebody
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-device = torch.device("cuda")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# --- Resolve weights relative to this file ---
+REPO_ROOT = Path(__file__).resolve().parents[3]  # .../echomimic_v2
+WEIGHTS_DIR = REPO_ROOT / "pretrained_weights" / "DWPose"
+
+DET_ONNX = os.environ.get("YOLOX_ONNX", str(WEIGHTS_DIR / "yolox_l.onnx"))
+POSE_ONNX = os.environ.get("DWPOSE_ONNX", str(WEIGHTS_DIR / "dw-ll_ucoco_384.onnx"))
+
 
 class DWposeDetector:
     """
@@ -19,13 +27,15 @@ class DWposeDetector:
                     such as https://huggingface.co/yzd-v/DWPose/blob/main/dw-ll_ucoco_384.onnx
         device: (str) 'cpu' or 'cuda:{device_id}'
     """
+
     def __init__(self, model_det, model_pose, device='cuda'):
         self.args = model_det, model_pose, device
 
     def release_memory(self):
         if hasattr(self, 'pose_estimation'):
             del self.pose_estimation
-            import gc; gc.collect()
+            import gc;
+            gc.collect()
 
     def __call__(self, oriImg):
         if not hasattr(self, 'pose_estimation'):
@@ -61,8 +71,9 @@ class DWposeDetector:
 
             return pose
 
+
 dwpose_detector = DWposeDetector(
-    model_det="your_path_to_yolox_l.onnx",
-    model_pose="your_path_to_dw-ll_ucoco_384.onnx",
+    model_det=DET_ONNX,
+    model_pose=POSE_ONNX,
     device=device)
-print('dwpose_detector init ok', device)
+print("dwpose_detector init ok", device, "\n  det:", DET_ONNX, "\n  pose:", POSE_ONNX)

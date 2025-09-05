@@ -1,3 +1,5 @@
+EMTD_dataset/ori_video_dir
+EMTD_dataset/ori_video_dir_segs
 .ipynb_checkpoints
 .idea
 assets/halfbody_demo/video
