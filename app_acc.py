@@ -46,20 +46,17 @@ fps = 24
 context_frames = 12
 context_overlap = 3
 
-def generate(image_input, 
-            audio_input, 
-            pose_input, 
-            width, 
-            height, 
-            length, 
-            steps, 
-            sample_rate, 
-            cfg, 
-            fps, 
-            context_frames, 
-            context_overlap, 
-            quantization_input, 
-            seed):
+def generate(image_input, audio_input, pose_input, length, steps, quantization_input, seed):
+    # cast UI numbers (they come as float/None)
+    length = int(length)
+    steps = int(steps)
+    width, height = 768, 768
+    sample_rate = 16000
+    cfg = 1.0
+    fps = 24
+    context_frames = 12
+    context_overlap = 3
+
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
@@ -274,7 +271,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
 
     generate_button.click(
         generate,
-        inputs=[image_input, audio_input, pose_input, width, height, length, steps, sample_rate, cfg, fps, context_frames, context_overlap, quantization_input, seed],
+        inputs=[image_input, audio_input, pose_input, length, steps, quantization_input, seed],
         outputs=[video_output, seed_text],
     )
 
