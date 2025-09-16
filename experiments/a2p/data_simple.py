@@ -1,4 +1,4 @@
-# experiments/a2p/data_simple.py
+# echomimic_v2/experiments/a2p/data_simple.py
 import os
 import re
 import argparse
@@ -11,7 +11,6 @@ import torch
 import pathlib
 import math
 from collections import OrderedDict
-
 
 def natural_key(s: str):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
@@ -66,6 +65,8 @@ def hands_from_pose_dict(p: dict) -> Tuple[np.ndarray, np.ndarray]:
     h = np.nan_to_num(h, nan=0.0).astype(np.float32)
     hs = np.nan_to_num(hs, nan=0.0).astype(np.float32)
     return h, hs
+
+
 @dataclass
 class A2PConfig:
     fps: int = 24
@@ -76,6 +77,7 @@ class A2PConfig:
     heat_W: int = 256
     mode: Literal["heatmap", "keypoints"] = "heatmap"
 
+
 def gaussian_splats(points_xy01: np.ndarray, conf: np.ndarray, H: int, W: int, sigma: float = 3.0) -> np.ndarray:
     yy, xx = np.mgrid[0:H, 0:W]
     heat = np.zeros((H, W), np.float32)
@@ -85,6 +87,7 @@ def gaussian_splats(points_xy01: np.ndarray, conf: np.ndarray, H: int, W: int, s
         g = np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / (2 * sigma * sigma))
         heat = np.maximum(heat, (c * g).astype(np.float32))
     return np.clip(heat, 0, 1)
+
 
 class A2PDataset(Dataset):
     def __init__(self, pairs: List[Tuple[str, str]], cfg: A2PConfig,
@@ -242,7 +245,6 @@ class A2PDataset(Dataset):
             )
 
 
-
 def make_pairs(list_file: str) -> List[Tuple[str, str]]:
     pairs = []
     with open(list_file, "r", encoding="utf-8") as f:
@@ -276,6 +278,11 @@ def make_loaders(
     val_dl = DataLoader(
         val_ds, batch_size=bs, shuffle=False, num_workers=use_workers
     )
+
+    print(f"Train dataset size: {len(train_ds)}")
+    print(f"Val dataset size: {len(val_ds)}")
+    print(f"Workers: {use_workers}")
+
     return train_dl, val_dl
 
 

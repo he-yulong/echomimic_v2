@@ -1,6 +1,7 @@
-# experiments/a2p/train.py
+# echomimic_v2/experiments/a2p/train.py
 import os
 import torch
+torch.autograd.set_detect_anomaly(True)
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -31,6 +32,18 @@ def main():
     ap.add_argument("--heat_hw", type=int, nargs=2, default=[256, 256])
     ap.add_argument("--bs", type=int, default=16)
     ap.add_argument("--lr", type=float, default=1e-4)
+    # --- GAN options ---
+    ap.add_argument("--use_gan", action="store_true",
+                    help="Enable GAN loss (only in keypoints mode).")
+    ap.add_argument("--d_input", choices=["motion", "pose", "both"], default="motion",
+                    help="What the discriminator sees: motion deltas, raw poses, or both.")
+    ap.add_argument("--lambda_gan", type=float, default=1.0,
+                    help="Multiplier for GAN loss in generator.")
+    ap.add_argument("--lambda_d", type=float, default=1.0,
+                    help="Weight for discriminator’s fake loss.")
+    ap.add_argument("--lr_d", type=float, default=1e-4,
+                    help="Learning rate for discriminator.")
+
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--accum", type=int, default=1)
     ap.add_argument("--num_workers", type=int, default=4)
@@ -48,15 +61,41 @@ def main():
         filter_missing=(not args.no_filter_missing),
     )
 
-    model = Audio2Pose(mode=args.mode, fps=args.fps, heat_hw=tuple(args.heat_hw), lr=args.lr)
+    # model = Audio2Pose(mode=args.mode, fps=args.fps, heat_hw=tuple(args.heat_hw), lr=args.lr)
+    model = Audio2Pose(
+        mode=args.mode,
+        fps=args.fps,
+        heat_hw=tuple(args.heat_hw),
+        lr=args.lr,
+        use_gan=args.use_gan,
+        d_input=args.d_input,
+        lambda_gan=args.lambda_gan,
+        lambda_d=args.lambda_d,
+        lr_d=args.lr_d,
+    )
 
     logger = TensorBoardLogger(args.out, name=f"a2p_{args.mode}")
-    ckpt = ModelCheckpoint(dirpath=logger.log_dir, save_top_k=3, monitor="val/loss", mode="min")
+
+    ckpt_val = ModelCheckpoint(
+        dirpath=logger.log_dir,
+        save_top_k=3,
+        monitor="val/loss",
+        mode="min",
+        filename="val-{epoch:02d}-{val_loss:.4f}"
+    )
+
+    ckpt_train = ModelCheckpoint(
+        dirpath=logger.log_dir,
+        save_top_k=2,
+        monitor="train/loss",
+        mode="min",
+        filename="train-{epoch:02d}-{train_loss:.4f}"
+    )
 
     trainer = pl.Trainer(
         max_epochs=args.epochs,
         logger=logger,
-        callbacks=[ckpt],
+        callbacks=[ckpt_val, ckpt_train],
         # precision="16-mixed",
         # gradient_clip_val=1.0,
         # accumulate_grad_batches=args.accum,
