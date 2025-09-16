@@ -8,7 +8,8 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 
 # from .data import A2PConfig, make_loaders
 from .data_simple import A2PConfig, make_loaders
-from .model_simple import Audio2Pose
+# from .model_simple import Audio2Pose
+from .model import Audio2Pose
 
 torch.set_float32_matmul_precision("high")
 torch.backends.cudnn.benchmark = True
@@ -43,11 +44,26 @@ def main():
                     help="Weight for discriminator’s fake loss.")
     ap.add_argument("--lr_d", type=float, default=1e-4,
                     help="Learning rate for discriminator.")
+    ap.add_argument("--gan_warmup_epochs", type=int, default=10)
+    ap.add_argument("--d_every", type=int, default=2)
 
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--accum", type=int, default=1)
     ap.add_argument("--num_workers", type=int, default=4)
     ap.add_argument("--out", type=str, default="a2p_ckpts")
+
+    ap.add_argument("--d_mid", type=int, default=512)
+    ap.add_argument("--enc_layers", type=int, default=4)
+    ap.add_argument("--head_hidden", type=int, default=512)
+    ap.add_argument("--head_layers", type=int, default=3)
+    ap.add_argument("--head_dropout", type=float, default=0.1)
+
+    ap.add_argument("--enc_type", choices=["basic", "tcn"], default="basic")
+    ap.add_argument("--tcn_dilations", type=str, default="1,2,4,8,16,32")
+    ap.add_argument("--tcn_stacks", type=int, default=1)
+    ap.add_argument("--tcn_dropout", type=float, default=0.1)
+    ap.add_argument("--tcn_kernel", type=int, default=5)
+
     args = ap.parse_args()
 
     cfg = A2PConfig(
@@ -62,11 +78,29 @@ def main():
     )
 
     # model = Audio2Pose(mode=args.mode, fps=args.fps, heat_hw=tuple(args.heat_hw), lr=args.lr)
+    # model = Audio2Pose(
+    #     mode=args.mode,
+    #     fps=args.fps,
+    #     heat_hw=tuple(args.heat_hw),
+    #     lr=args.lr,
+    #     use_gan=args.use_gan,
+    #     d_input=args.d_input,
+    #     lambda_gan=args.lambda_gan,
+    #     lambda_d=args.lambda_d,
+    #     lr_d=args.lr_d,
+    # )
     model = Audio2Pose(
         mode=args.mode,
         fps=args.fps,
         heat_hw=tuple(args.heat_hw),
         lr=args.lr,
+        # capacity
+        d_mid=args.d_mid,
+        enc_layers=args.enc_layers,
+        head_hidden=args.head_hidden,
+        head_layers=args.head_layers,
+        head_dropout=args.head_dropout,
+        # GAN
         use_gan=args.use_gan,
         d_input=args.d_input,
         lambda_gan=args.lambda_gan,
@@ -92,15 +126,21 @@ def main():
         filename="train-{epoch:02d}-{train_loss:.4f}"
     )
 
+    ckpt_last = ModelCheckpoint(
+        dirpath=logger.log_dir,
+        save_last=True,  # <- this ensures "last.ckpt" is updated after every epoch
+        filename="last"  # optional, default is "last.ckpt"
+    )
+
     trainer = pl.Trainer(
         max_epochs=args.epochs,
         logger=logger,
-        callbacks=[ckpt_val, ckpt_train],
+        callbacks=[ckpt_val, ckpt_train, ckpt_last],
         # precision="16-mixed",
         # gradient_clip_val=1.0,
         # accumulate_grad_batches=args.accum,
         # devices=1, accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        log_every_n_steps=100,
+        # log_every_n_steps=100,
     )
     trainer.fit(model, train_dl, val_dl)
 
