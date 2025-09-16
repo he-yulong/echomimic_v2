@@ -15,7 +15,7 @@ import torchaudio
 import cv2
 
 # your training code
-from experiments.a2p.model_simple import Audio2Pose
+from experiments.a2p import Audio2Pose
 
 # keep these in sync with training
 SAMPLE_RATE = 16000

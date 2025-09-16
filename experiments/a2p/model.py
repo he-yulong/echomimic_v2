@@ -1,47 +1,11 @@
 # echomimic_v2/experiments/a2p/model.py
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
-
-
-class TemporalAudioEncoder(nn.Module):
-    # in:  [B, T, 80]  (80-bin mel per frame)
-    # out: [B, T, d]   (d = 256 by default)
-    def __init__(self, d_in=80, d_mid=256, n_layers=2):
-        super().__init__()
-        layers, d = [], d_in
-        for _ in range(n_layers):
-            layers += [nn.Conv1d(d, d_mid, 5, padding=2), nn.GELU(),
-                       nn.Conv1d(d_mid, d_mid, 5, padding=2), nn.GELU()]
-            d = d_mid
-        self.net = nn.Sequential(*layers)
-        self.out_dim = d_mid
-
-    def forward(self, x):  # x: [B,T,D]
-        y = self.net(x.transpose(1, 2))  # [B,d,T]
-        return y.transpose(1, 2)  # [B,T,d]
-
-
-class A2PKeypointHead(nn.Module):
-    # in:  [B, T, d]
-    # out: [B, T, 2, 21, 2]   (2 hands × 21 joints × (x,y))
-    def __init__(self, d_in, n_kp=42, hidden=512, n_layers=3, dropout=0.1):
-        super().__init__()
-        layers = []
-        d = d_in
-        for _ in range(max(1, n_layers)):
-            layers += [nn.Linear(d, hidden), nn.GELU(),
-                       nn.LayerNorm(hidden), nn.Dropout(dropout)]
-            d = hidden
-        layers += [nn.Linear(d, n_kp * 2)]
-        self.net = nn.Sequential(*layers)
-        self.n_kp = n_kp
-
-    def forward(self, x):
-        B, T, _ = x.shape
-        y = self.net(x).view(B, T, 2, 21, 2)
-        return torch.sigmoid(y)
+from .audio_encoder_tcn import TemporalAudioEncoderTCN
+from .audio_encoder import TemporalAudioEncoder
+from .keypoint_head import A2PKeypointHead
+from .discriminator import Discriminator1D
 
 
 def _to_motion_delta(seq_xy: torch.Tensor) -> torch.Tensor:
@@ -61,80 +25,9 @@ def _flatten_tp22(x: torch.Tensor) -> torch.Tensor:
     return x.reshape(x.size(0), x.size(1), -1)
 
 
-class Discriminator1D(nn.Module):
-    """
-    Temporal Conv discriminator over sequences of flattened joints.
-    Input: [B, T', C] where C=84 (pose or motion-delta).
-    Output: [B, 1] (LSGAN score)
-    """
-
-    def __init__(self, c_in=84, d=128, n_blocks=3):
-        super().__init__()
-        layers = []
-        ch = c_in
-        for _ in range(n_blocks):
-            layers += [
-                nn.Conv1d(ch, d, 3, padding=1), nn.GELU(),
-                nn.Conv1d(d, d, 3, padding=1), nn.GELU()
-            ]
-            ch = d
-        self.backbone = nn.Sequential(*layers)
-        self.head = nn.Linear(d, 1)
-
-    def forward(self, x_btc: torch.Tensor) -> torch.Tensor:
-        # x: [B, T', C] -> [B, C, T']
-        x = x_btc.transpose(1, 2)
-        h = self.backbone(x)  # [B, d, T']
-        h = h.mean(dim=2)  # [B, d]
-        logit = self.head(h)  # [B,1]
-        return logit
-
-
-class TCNBlock(nn.Module):
-    def __init__(self, c_in, c_out, k=5, dilation=1, dropout=0.1):
-        super().__init__()
-        pad = (k - 1) // 2 * dilation
-        self.conv1 = nn.Conv1d(c_in, c_out, k, padding=pad, dilation=dilation)
-        self.act1 = nn.GELU()
-        self.conv2 = nn.Conv1d(c_out, c_out, k, padding=pad, dilation=dilation)
-        self.act2 = nn.GELU()
-        self.do = nn.Dropout(dropout)
-        self.proj = nn.Conv1d(c_in, c_out, 1) if c_in != c_out else nn.Identity()
-        self.ln = nn.LayerNorm(c_out)
-
-    def forward(self, x_bct):  # [B,C,T]
-        h = self.conv1(x_bct);
-        h = self.act1(h)
-        h = self.conv2(h);
-        h = self.act2(h)
-        h = self.do(h)
-        h = h + self.proj(x_bct)  # residual
-        # layernorm over channel -> swap to [B,T,C], norm, back to [B,C,T]
-        h = h.transpose(1, 2)
-        h = self.ln(h)
-        return h.transpose(1, 2)
-
-
-class TemporalAudioEncoderTCN(nn.Module):
-    # in: [B,T,80]  out: [B,T,d_mid]
-    def __init__(self, d_in=80, d_mid=512, dilations=(1, 2, 4, 8, 16, 32), n_stacks=1, dropout=0.1, k=5):
-        super().__init__()
-        layers = [nn.Conv1d(d_in, d_mid, 1)]  # cheap lift
-        for _ in range(n_stacks):
-            for d in dilations:
-                layers.append(TCNBlock(d_mid, d_mid, k=k, dilation=d, dropout=dropout))
-        self.net = nn.Sequential(*layers)
-        self.out_dim = d_mid
-
-    def forward(self, x):  # [B,T,D]
-        y = self.net(x.transpose(1, 2))  # [B,d,T]
-        return y.transpose(1, 2)  # [B,T,d]
-
-
 class Audio2Pose(pl.LightningModule):
     def __init__(
             self,
-            mode="heatmap",
             fps=24,
             heat_hw=(256, 256),
             lr=1e-4,
@@ -176,11 +69,10 @@ class Audio2Pose(pl.LightningModule):
             raise ValueError(f"Unknown enc_type: {enc_type}")
         self.head = A2PKeypointHead(self.enc.out_dim, n_kp=42,
                                     hidden=head_hidden, n_layers=head_layers, dropout=head_dropout)
-        self.mode = mode
         self.lr, self.wd = lr, wd
 
         # --- GAN setup ---
-        self.use_gan = bool(use_gan and (mode == "keypoints"))
+        self.use_gan = bool(use_gan)
         self.d_input = d_input
         self.lambda_gan = float(lambda_gan)
         self.lambda_d = float(lambda_d)
@@ -327,7 +219,7 @@ class Audio2Pose(pl.LightningModule):
         if self.use_gan:
             opt_g, opt_d = self.optimizers()
         else:
-            (opt_g,) = self.optimizers()
+            opt_g = self.optimizers()
 
         audio = batch["audio"].float().to(self.device, non_blocking=True)
 
@@ -338,6 +230,7 @@ class Audio2Pose(pl.LightningModule):
             opt_g.zero_grad(set_to_none=True)
             self.manual_backward(reg_loss)
             opt_g.step()
+            self.log("train/loss", reg_loss.detach(), prog_bar=True, on_step=False, on_epoch=True)
             return reg_loss
 
         # --- with GAN: D then G (recompute pred for G) ---

@@ -1,14 +1,11 @@
 # echomimic_v2/experiments/a2p/train.py
-import os
 import torch
 torch.autograd.set_detect_anomaly(True)
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 
-# from .data import A2PConfig, make_loaders
 from .data_simple import A2PConfig, make_loaders
-# from .model_simple import Audio2Pose
 from .model import Audio2Pose
 
 torch.set_float32_matmul_precision("high")
@@ -26,7 +23,6 @@ def main():
                     help="Don’t drop rows missing precomputed files")
     ap.add_argument("--train_list", required=True)
     ap.add_argument("--val_list", required=True)
-    ap.add_argument("--mode", choices=["heatmap", "keypoints"], default="heatmap")
     ap.add_argument("--win_T", type=int, default=12)
     ap.add_argument("--hop_T", type=int, default=3)
     ap.add_argument("--fps", type=int, default=24)
@@ -68,7 +64,7 @@ def main():
 
     cfg = A2PConfig(
         fps=args.fps, win_T=args.win_T, hop_T=args.hop_T,
-        heat_H=args.heat_hw[0], heat_W=args.heat_hw[1], mode=args.mode
+        heat_H=args.heat_hw[0], heat_W=args.heat_hw[1]
     )
     train_dl, val_dl = make_loaders(
         args.train_list, args.val_list, cfg,
@@ -77,20 +73,7 @@ def main():
         filter_missing=(not args.no_filter_missing),
     )
 
-    # model = Audio2Pose(mode=args.mode, fps=args.fps, heat_hw=tuple(args.heat_hw), lr=args.lr)
-    # model = Audio2Pose(
-    #     mode=args.mode,
-    #     fps=args.fps,
-    #     heat_hw=tuple(args.heat_hw),
-    #     lr=args.lr,
-    #     use_gan=args.use_gan,
-    #     d_input=args.d_input,
-    #     lambda_gan=args.lambda_gan,
-    #     lambda_d=args.lambda_d,
-    #     lr_d=args.lr_d,
-    # )
     model = Audio2Pose(
-        mode=args.mode,
         fps=args.fps,
         heat_hw=tuple(args.heat_hw),
         lr=args.lr,
@@ -108,7 +91,7 @@ def main():
         lr_d=args.lr_d,
     )
 
-    logger = TensorBoardLogger(args.out, name=f"a2p_{args.mode}")
+    logger = TensorBoardLogger(args.out, name=f"a2p_keypoints")
 
     ckpt_val = ModelCheckpoint(
         dirpath=logger.log_dir,

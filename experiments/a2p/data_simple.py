@@ -9,7 +9,6 @@ import torchaudio
 import numpy as np
 import torch
 import pathlib
-import math
 from collections import OrderedDict
 
 def natural_key(s: str):
@@ -75,7 +74,6 @@ class A2PConfig:
     hop_T: int = 3
     heat_H: int = 256
     heat_W: int = 256
-    mode: Literal["heatmap", "keypoints"] = "heatmap"
 
 
 def gaussian_splats(points_xy01: np.ndarray, conf: np.ndarray, H: int, W: int, sigma: float = 3.0) -> np.ndarray:
@@ -229,20 +227,12 @@ class A2PDataset(Dataset):
         if hands_xy.shape[0] < T:
             raise RuntimeError("something wrong with hands_xy")
 
-        if self.cfg.mode == "heatmap":
-            H, W = self.cfg.heat_H, self.cfg.heat_W
-            target = np.zeros((T, H, W), np.float32)
-            for t in range(T):
-                pts = hands_xy[t].reshape(-1, 2)
-                cf = hands_cf[t].reshape(-1)
-                target[t] = gaussian_splats(pts, cf, H, W, sigma=3.0)
-            return dict(audio=feats, target=torch.from_numpy(target).unsqueeze(1))
-        else:
-            return dict(
-                audio=feats,
-                target=torch.from_numpy(hands_xy).float(),
-                conf=torch.from_numpy(hands_cf).float()
-            )
+
+        return dict(
+            audio=feats,
+            target=torch.from_numpy(hands_xy).float(),
+            conf=torch.from_numpy(hands_cf).float()
+        )
 
 
 def make_pairs(list_file: str) -> List[Tuple[str, str]]:
@@ -295,7 +285,6 @@ if __name__ == '__main__':
                     help="CSV with 'audio.wav,pose_dir' per line")
     ap.add_argument("--val_list", default="../../EMTD_dataset/lists/val.csv",
                     help="CSV with 'audio.wav,pose_dir' per line")
-    ap.add_argument("--mode", choices=["heatmap", "keypoints"], default="heatmap")
     ap.add_argument("--bs", type=int, default=8)
     ap.add_argument("--iters", type=int, default=3, help="number of batches to time")
     ap.add_argument("--num_workers", type=int, default=8)
@@ -318,7 +307,7 @@ if __name__ == '__main__':
 
     cfg = A2PConfig(
         fps=args.fps, win_T=args.win_T, hop_T=args.hop_T,
-        heat_H=args.heat_hw[0], heat_W=args.heat_hw[1], mode=args.mode
+        heat_H=args.heat_hw[0], heat_W=args.heat_hw[1]
     )
     print(cfg)
 
@@ -330,7 +319,7 @@ if __name__ == '__main__':
     )
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"device={dev} | mode={args.mode} | bs={args.bs} | workers={args.num_workers} "
+    print(f"device={dev} | bs={args.bs} | workers={args.num_workers} "
           f"| win_T={cfg.win_T} hop_T={cfg.hop_T} | heat_hw=({cfg.heat_H},{cfg.heat_W})")
     print(f"dataset size (windows): {len(train_dl.dataset)}")
     it = iter(train_dl)
