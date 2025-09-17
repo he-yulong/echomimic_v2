@@ -98,7 +98,7 @@ def main():
         save_top_k=3,
         monitor="val/loss",
         mode="min",
-        filename="val-{epoch:02d}-{val_loss:.4f}"
+        filename="val-{epoch:02d}-{val/loss:.4f}"  # TODO: val/loss
     )
 
     ckpt_train = ModelCheckpoint(
@@ -106,7 +106,7 @@ def main():
         save_top_k=2,
         monitor="train/loss",
         mode="min",
-        filename="train-{epoch:02d}-{train_loss:.4f}"
+        filename="train-{epoch:02d}-{train/loss:.4f}"
     )
 
     ckpt_last = ModelCheckpoint(

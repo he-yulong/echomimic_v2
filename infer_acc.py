@@ -1,3 +1,4 @@
+# echomimic_v2/infer_acc.py
 import argparse
 import os
 import random
@@ -20,20 +21,21 @@ from src.models.unet_2d_condition import UNet2DConditionModel
 from src.models.unet_3d_emo import EMOUNet3DConditionModel
 from src.models.whisper.audio2feature import load_audio_model
 
-from src.pipelines.pipeline_echomimicv2_acc import EchoMimicV2Pipeline 
+from src.pipelines.pipeline_echomimicv2_acc import EchoMimicV2Pipeline
 from src.utils.util import get_fps, read_frames, save_videos_grid
 from src.utils.dwpose_util import draw_pose_select_v2
 import sys
 from src.models.pose_encoder import PoseEncoder
 from moviepy.editor import VideoFileClip, AudioFileClip
 
-
 ffmpeg_path = os.getenv('FFMPEG_PATH')
 if ffmpeg_path is None:
-    print("please download ffmpeg-static and export to FFMPEG_PATH. \nFor example: export FFMPEG_PATH=./ffmpeg-4.4-amd64-static")
+    print(
+        "please download ffmpeg-static and export to FFMPEG_PATH. \nFor example: export FFMPEG_PATH=./ffmpeg-4.4-amd64-static")
 elif ffmpeg_path not in os.getenv('PATH'):
     print("add ffmpeg to path")
     os.environ["PATH"] = f"{ffmpeg_path}:{os.environ['PATH']}"
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -45,7 +47,7 @@ def parse_args():
 
     parser.add_argument("--context_frames", type=int, default=12)
     parser.add_argument("--context_overlap", type=int, default=3)
-   
+
     parser.add_argument("--motion_sync", type=int, default=1)
 
     parser.add_argument("--cfg", type=float, default=1.0)
@@ -173,9 +175,9 @@ def main():
         final_fps = args.fps
 
         inputs_dict = {
-        "refimg": f'{ref_image_path}',
-        "audio": f'{audio_path}',
-        "pose": f'{pose_dir}',
+            "refimg": f'{ref_image_path}',
+            "audio": f'{audio_path}',
+            "pose": f'{pose_dir}',
         }
 
         start_idx = 0
@@ -184,14 +186,14 @@ def main():
         print('Reference:', inputs_dict['refimg'])
         print('Audio:', inputs_dict['audio'])
 
-        save_path = Path(f"{save_dir}/{ref_name}")    
+        save_path = Path(f"{save_dir}/{ref_name}")
         save_path.mkdir(exist_ok=True, parents=True)
         save_name = f"{save_path}/{ref_name}-a-{audio_name}-i{start_idx}"
 
         ref_img_pil = Image.open(ref_image_path).convert("RGB")
         audio_clip = AudioFileClip(inputs_dict['audio'])
-    
-        args.L = min(args.L, int(audio_clip.duration * final_fps), len(os.listdir(inputs_dict['pose'])))  
+
+        args.L = min(args.L, int(audio_clip.duration * final_fps), len(os.listdir(inputs_dict['pose'])))
         # ==================== face_locator =====================
         pose_list = []
         for index in range(start_idx, start_idx + args.L):
@@ -200,11 +202,12 @@ def main():
             detected_pose = np.load(tgt_musk_path, allow_pickle=True).tolist()
             imh_new, imw_new, rb, re, cb, ce = detected_pose['draw_pose_params']
             im = draw_pose_select_v2(detected_pose, imh_new, imw_new, ref_w=800)
-            im = np.transpose(np.array(im),(1, 2, 0))
-            tgt_musk[rb:re,cb:ce,:] = im
+            im = np.transpose(np.array(im), (1, 2, 0))
+            tgt_musk[rb:re, cb:ce, :] = im
 
             tgt_musk_pil = Image.fromarray(np.array(tgt_musk)).convert('RGB')
-            pose_list.append(torch.Tensor(np.array(tgt_musk_pil)).to(dtype=weight_dtype, device=device).permute(2,0,1) / 255.0)
+            pose_list.append(
+                torch.Tensor(np.array(tgt_musk_pil)).to(dtype=weight_dtype, device=device).permute(2, 0, 1) / 255.0)
 
         poses_tensor = torch.stack(pose_list, dim=1).unsqueeze(0)
         audio_clip = AudioFileClip(inputs_dict['audio'])
@@ -213,7 +216,7 @@ def main():
         video = pipe(
             ref_img_pil,
             inputs_dict['audio'],
-            poses_tensor[:,:,:args.L,...],
+            poses_tensor[:, :, :args.L, ...],
             width,
             height,
             args.L,
@@ -237,12 +240,12 @@ def main():
             fps=final_fps,
         )
 
-        video_clip_sig = VideoFileClip(save_name + "_woa_sig.mp4",)
+        video_clip_sig = VideoFileClip(save_name + "_woa_sig.mp4", )
         video_clip_sig = video_clip_sig.set_audio(audio_clip)
         video_clip_sig.write_videofile(save_name + "_sig.mp4", codec="libx264", audio_codec="aac", threads=2)
         os.system("rm {}".format(save_name + "_woa_sig.mp4"))
         print(save_name)
 
+
 if __name__ == "__main__":
     main()
-

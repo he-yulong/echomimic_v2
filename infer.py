@@ -60,6 +60,7 @@ def main():
     args = parse_args()
 
     config = OmegaConf.load(args.config)
+    # TODO: try bf16
     if config.weight_dtype == "fp16":
         weight_dtype = torch.float16
     else:
