@@ -5,6 +5,7 @@ denoising_unet_path: './pretrained_weights/denoising_unet_acc.pth'
 reference_unet_path: "./pretrained_weights/reference_unet.pth"
 pose_encoder_path: "./pretrained_weights/pose_encoder.pth"
 motion_module_path: './pretrained_weights/motion_module_acc.pth'
+a2p_ckpt_path: './a2p_runs/a2p_keypoints/version_24/last.ckpt'
 
 audio_mapper_path: "./pretrained_weights/audio_mapper-50000.pth"
 auido_guider_path: "./pretrained_weights/wav2vec2-base-960h"

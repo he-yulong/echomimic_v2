@@ -56,7 +56,7 @@ def main():
     weight_dtype = get_weight_dtype(config)
     device = select_device(args.device)
 
-    vae, reference_unet, denoising_unet, pose_net, audio_processor = init_models(
+    vae, reference_unet, denoising_unet, pose_net, audio_processor, a2p_model = init_models(
         config, infer_config, weight_dtype, device
     )
 
@@ -64,7 +64,7 @@ def main():
 
     pipe = build_pipeline(
         vae, reference_unet, denoising_unet, audio_processor, pose_net,
-        scheduler, device, weight_dtype, variant="acc"
+        scheduler, device, weight_dtype, variant="acc", a2p_model=a2p_model
     )
 
     date_str = datetime.now().strftime("%Y%m%d")
@@ -107,10 +107,11 @@ def main():
 
         args.L = min(args.L, int(audio_clip.duration * final_fps), len(os.listdir(inputs_dict['pose'])))
         # ==================== face_locator =====================
-        poses_tensor = build_pose_tensor(
-            pose_dir, start_idx=0, length=args.L,
-            width=args.W, height=args.H, device=device, dtype=weight_dtype
-        )
+        # poses_tensor = build_pose_tensor(
+        #     pose_dir, start_idx=0, length=args.L,
+        #     width=args.W, height=args.H, device=device, dtype=weight_dtype
+        # )
+        poses_tensor = None
         # Run pipeline
         t0 = time.time()
         video = run_inference(pipe, ref_img_pil, inputs_dict["audio"], poses_tensor, args, generator, start_idx)

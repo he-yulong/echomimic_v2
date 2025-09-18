@@ -14,6 +14,7 @@ python -m experiments.a2p.train  `
   --val_list   (Join-Path $lists "val.csv") `
   --fps 24 --win_T 12 --hop_T 3 `
   --bs 8 --epochs 300 --num_workers 12 `
-  --d_input motion --use_gan --lambda_gan 1.0 --lambda_d 1.0 --lr_d 1e-4 `
+  --d_input motion --lambda_gan 1.0 --lambda_d 1.0 --lr_d 1e-4 `
+  --use_init_pose `
   --out $out
-#
+#--use_gan 

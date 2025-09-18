@@ -8,7 +8,7 @@ from .keypoint_head import A2PKeypointHead
 from .discriminator import Discriminator1D
 from .losses import supervised_loss
 from .gan_losses import gan_losses
-
+import torch.nn as nn
 
 class Audio2Pose(pl.LightningModule):
     def __init__(self, fps=24, lr=1e-4, wd=0.01,
@@ -25,10 +25,17 @@ class Audio2Pose(pl.LightningModule):
                  tcn_stacks: int = 1,
                  tcn_dropout: float = 0.1,
                  tcn_kernel: int = 5,
+
+                 use_init_pose: bool = False, cond_mode: str = "add",
                  ):
         super().__init__()
         self.save_hyperparameters()
+
+        self.use_init_pose = use_init_pose
+        self.cond_mode = cond_mode
         self.fps = int(fps)
+        self.lr, self.wd = lr, wd
+        # 1) encoder (build this first so we know out_dim)
         # base encoder+head (keep your original)
         if enc_type == "basic":
             self.enc = TemporalAudioEncoder(d_in=80, d_mid=d_mid, n_layers=enc_layers)
@@ -40,9 +47,21 @@ class Audio2Pose(pl.LightningModule):
             )
         else:
             raise ValueError(f"Unknown enc_type: {enc_type}")
-        self.head = A2PKeypointHead(self.enc.out_dim, n_kp=42,
+
+        d_enc = self.enc.out_dim  # encoder feature width
+        # 2) conditioning projector (pose->[d_enc])
+        # (84 = 2 hands × 21 joints × (x,y))
+        # projects a single frame pose [84] -> encoder width, then broadcast over time
+        # (84 = 2 hands × 21 joints × (x,y))
+        self.pose_cond = nn.Sequential(
+            nn.Linear(84, d_mid), nn.GELU(),
+            nn.Linear(d_mid, d_enc)
+        )
+
+        # 3) head input dim (if you ever set cond_mode="cat", head sees d_enc*2)
+        head_in = d_enc * 2 if (self.use_init_pose and self.cond_mode == "cat") else d_enc
+        self.head = A2PKeypointHead(head_in, n_kp=42,
                                     hidden=head_hidden, n_layers=head_layers, dropout=head_dropout)
-        self.lr, self.wd = lr, wd
 
         # --- GAN setup ---
         self.use_gan = bool(use_gan)
@@ -60,6 +79,8 @@ class Audio2Pose(pl.LightningModule):
         # manual optimization for (G,D)
         self.automatic_optimization = False
 
+
+
     def on_train_epoch_start(self):
         # Warm up the GAN weight
         if self.use_gan:
@@ -68,8 +89,26 @@ class Audio2Pose(pl.LightningModule):
             self.log("train/lambda_gan", self.curr_lambda_gan, prog_bar=True)
 
     # --------- forward & supervised losses (unchanged semantics) ---------
-    def forward(self, audio_feats):
-        pred = self.head(self.enc(audio_feats))  # [B,T,2,21,2]
+    def forward(self, audio_feats, init_pose=None):
+        enc = self.enc(audio_feats)  # [B,T,d]
+
+        if self.use_init_pose and init_pose is not None:
+            # init_pose: [B, 2,21,2] -> [B,84]
+            B, T = enc.shape[0], enc.shape[1]
+            pose_flat = init_pose.view(B, -1)  # [B,84]
+            cond = self.pose_cond(pose_flat).unsqueeze(1)  # [B,1,d]
+            cond = cond.expand(-1, T, -1)  # [B,T,d]
+
+            if self.cond_mode == "cat":
+                # If you prefer concat, change the head’s input dim accordingly.
+                x = torch.cat([enc, cond], dim=-1)
+            else:
+                # default: additive bias
+                x = enc + cond
+        else:
+            x = enc
+
+        pred = self.head(x)  # [B,T,2,21,2]
         return pred.clamp(0, 1)  # stay in image range (no in-place)
 
     def _cal_and_log_loss(self, batch, pred, label: str):
@@ -101,10 +140,13 @@ class Audio2Pose(pl.LightningModule):
             opt_g = self.optimizers()
 
         audio = batch["audio"].float().to(self.device, non_blocking=True)
+        init_pose = batch.get("init_pose", None)
+        if init_pose is not None:
+            init_pose = init_pose.to(self.device)
 
         # --- no-GAN path ---
         if not self.use_gan:
-            pred = self(audio)
+            pred = self(audio, init_pose=init_pose)
             reg_loss = self._cal_and_log_loss(batch, pred, 'train')
             opt_g.zero_grad(set_to_none=True)
             self.manual_backward(reg_loss)
@@ -117,7 +159,7 @@ class Audio2Pose(pl.LightningModule):
 
         # Train D on detached fakes
         with torch.no_grad():
-            pred_d = self(audio)
+            pred_d = self(audio, init_pose=init_pose)
         _, d_loss = gan_losses(pred_d, gt, batch, self.disc,
                                lambda_d=self.lambda_d, fps=self.fps, d_input=self.d_input)
         opt_d.zero_grad(set_to_none=True)
@@ -125,7 +167,7 @@ class Audio2Pose(pl.LightningModule):
         opt_d.step()
 
         # Train G (fresh forward)
-        pred = self(audio)
+        pred = self(audio, init_pose=init_pose)
         reg_loss = self._cal_and_log_loss(batch, pred, 'train')
         g_adv, _ = gan_losses(pred, gt, batch, self.disc,
                               lambda_d=self.lambda_d, fps=self.fps, d_input=self.d_input)
@@ -144,8 +186,11 @@ class Audio2Pose(pl.LightningModule):
 
     def validation_step(self, batch, _):
         audio = batch["audio"].float().to(self.device)
+        init_pose = batch.get("init_pose", None)
+        if init_pose is not None:
+            init_pose = init_pose.to(self.device)
         with torch.no_grad():
-            pred = self(audio)
+            pred = self(audio, init_pose=init_pose)
 
             # supervised part (this already logs val/reg_loss, l_pos, l_bone, l_vel)
             reg_loss = self._cal_and_log_loss(batch, pred, 'val')

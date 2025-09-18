@@ -6,7 +6,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 
 from .data_simple import A2PConfig, make_loaders
-from .model import Audio2Pose
+from .model_v2 import Audio2Pose
 
 torch.set_float32_matmul_precision("high")
 torch.backends.cudnn.benchmark = True
@@ -60,6 +60,10 @@ def main():
     ap.add_argument("--tcn_dropout", type=float, default=0.1)
     ap.add_argument("--tcn_kernel", type=int, default=5)
 
+    ap.add_argument("--use_init_pose", action="store_true", help="Condition generator on previous pose")
+    ap.add_argument("--cond_mode", choices=["add", "cat"], default="add",
+                    help="Fuse pose conditioning by addition or concat")
+
     args = ap.parse_args()
 
     cfg = A2PConfig(
@@ -75,7 +79,6 @@ def main():
 
     model = Audio2Pose(
         fps=args.fps,
-        heat_hw=tuple(args.heat_hw),
         lr=args.lr,
         # capacity
         d_mid=args.d_mid,
@@ -89,6 +92,9 @@ def main():
         lambda_gan=args.lambda_gan,
         lambda_d=args.lambda_d,
         lr_d=args.lr_d,
+
+        use_init_pose=args.use_init_pose,
+        cond_mode=args.cond_mode,
     )
 
     logger = TensorBoardLogger(args.out, name=f"a2p_keypoints")

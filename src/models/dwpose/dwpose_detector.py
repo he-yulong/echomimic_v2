@@ -1,3 +1,4 @@
+#echomimic_v2/src/models/dwpose/dwpose_detector.py
 import os
 from pathlib import Path
 import numpy as np

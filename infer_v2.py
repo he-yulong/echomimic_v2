@@ -19,6 +19,8 @@ from src.pipelines.pipeline_echomimicv2_acc_v2 import EchoMimicV2Pipeline as Acc
 from src.utils.util import save_videos_grid
 from src.models.pose_encoder import PoseEncoder
 from src.utils.dwpose_util import draw_pose_select_v2
+from experiments.a2p.model_v2 import Audio2Pose
+from src.models.dwpose.dwpose_detector import dwpose_detector
 
 from moviepy.editor import VideoFileClip, AudioFileClip
 
@@ -165,13 +167,19 @@ def init_audio_processor(config, device):
     return load_audio_model(model_path=config.audio_model_path, device=device)
 
 
+def init_a2p_model(ckpt_path, device):
+    model = Audio2Pose.load_from_checkpoint(ckpt_path, map_location=device).to(device).eval()
+    return model
+
+
 def init_models(config, infer_config, dtype, device):
+    a2p_model = init_a2p_model(config.a2p_ckpt_path, device)
     vae = init_vae(config, device, dtype)
     reference_unet = init_reference_unet(config, device, dtype)
     denoising_unet = init_denoising_unet(config, infer_config, device, dtype)
     pose_net = init_pose_encoder(config, device, dtype)
     audio_processor = init_audio_processor(config, device)
-    return vae, reference_unet, denoising_unet, pose_net, audio_processor
+    return vae, reference_unet, denoising_unet, pose_net, audio_processor, a2p_model
 
 
 ######################################
@@ -182,7 +190,7 @@ def build_scheduler(infer_config):
 
 
 def build_pipeline(vae, reference_unet, denoising_unet, audio_processor, pose_net,
-                   scheduler, device, dtype, variant: str = "base"):
+                   scheduler, device, dtype, a2p_model, variant: str = "base"):
     """Assemble EchoMimicV2 pipeline and move it to the right device/dtype."""
     Pipeline = AccPipe if variant == "acc" else BasePipe
     pipe = Pipeline(
@@ -192,6 +200,7 @@ def build_pipeline(vae, reference_unet, denoising_unet, audio_processor, pose_ne
         audio_guider=audio_processor,
         pose_encoder=pose_net,
         scheduler=scheduler,
+        a2p_model=a2p_model
     )
     return pipe.to(device, dtype=dtype)
 
@@ -292,6 +301,7 @@ def run_inference(pipe, ref_image, audio_path, poses_tensor, args, generator, st
         fps=args.fps,
         context_overlap=args.context_overlap,
         start_idx=start_idx,
+        detector=dwpose_detector
     ).videos
 
 
@@ -323,13 +333,13 @@ def mux_audio_to_video(video_path: str, audio_path: str, save_name: str, length:
 def setup_all(args):
     """Setup configs, models, scheduler, pipeline, and generator."""
     config, infer_config, weight_dtype, device, save_dir = setup_environment(args)
-    vae, reference_unet, denoising_unet, pose_net, audio_processor = init_models(
+    vae, reference_unet, denoising_unet, pose_net, audio_processor, a2p_model = init_models(
         config, infer_config, weight_dtype, device
     )
     scheduler = build_scheduler(infer_config)
     pipe = build_pipeline(
         vae, reference_unet, denoising_unet, audio_processor, pose_net,
-        scheduler, device, weight_dtype
+        scheduler, device, weight_dtype, a2p_model
     )
     generator = init_seed(args.seed)
     return pipe, config, infer_config, weight_dtype, device, save_dir, generator

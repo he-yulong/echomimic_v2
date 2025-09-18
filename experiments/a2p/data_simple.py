@@ -11,6 +11,7 @@ import torch
 import pathlib
 from collections import OrderedDict
 
+
 def natural_key(s: str):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
 
@@ -227,11 +228,19 @@ class A2PDataset(Dataset):
         if hands_xy.shape[0] < T:
             raise RuntimeError("something wrong with hands_xy")
 
+        # pick an initial pose for the window (previous frame if available)
+        if t0 > 0:
+            init_pose = xy_full[t0 - 1]  # [2,21,2]
+        else:
+            init_pose = xy_full[t0]  # fallback: first frame (only for the very first window)
+
+        init_pose = torch.from_numpy(init_pose).float()  # [2,21,2]
 
         return dict(
             audio=feats,
             target=torch.from_numpy(hands_xy).float(),
-            conf=torch.from_numpy(hands_cf).float()
+            conf=torch.from_numpy(hands_cf).float(),
+            init_pose=init_pose
         )
 
 

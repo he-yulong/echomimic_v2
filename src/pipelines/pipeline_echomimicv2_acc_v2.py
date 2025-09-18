@@ -25,7 +25,18 @@ from src.models.mutual_self_attention import ReferenceAttentionControl
 from src.pipelines.context import get_context_scheduler
 from src.pipelines.utils import get_tensor_interpolation_method
 from src.pipelines.step_func import origin_by_velocity_and_sample, psuedo_velocity_wrt_noisy_and_timestep
+from src.utils.dwpose_util import draw_pose_select_v2
+# ---------------------------------------------------------------
+# TODO: will remove later
+import torchaudio
 
+SAMPLE_RATE = 16000
+N_FFT = 1024
+N_MELS = 80
+F_MIN, F_MAX = 50, 7600
+
+
+# ---------------------------------------------------------------
 
 @dataclass
 class EchoMimicV2PipelineOutput(BaseOutput):
@@ -47,6 +58,7 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
                      DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler, EulerDiscreteScheduler,
                      EulerAncestralDiscreteScheduler, DPMSolverMultistepScheduler
                  ],
+                 a2p_model=None,  # <-- NEW
                  # (Optional) image_proj_model, tokenizer, text_encoder → placeholders for multimodal/text conditioning, but not used here.
                  image_proj_model=None,
                  tokenizer=None,
@@ -66,6 +78,7 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
             audio_guider=audio_guider,
             pose_encoder=pose_encoder,
             scheduler=scheduler,
+            a2p_model=a2p_model,
             image_proj_model=image_proj_model,
             tokenizer=tokenizer,
             text_encoder=text_encoder,
@@ -79,6 +92,94 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
         self.ref_image_processor = VaeImageProcessor(
             vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True
         )
+
+    # ---------------------------------------------------------------
+    def _build_mel(self, fps: int):
+        hop_length = round(SAMPLE_RATE / fps)
+        mel = torchaudio.transforms.MelSpectrogram(
+            sample_rate=SAMPLE_RATE, n_fft=N_FFT, hop_length=hop_length,
+            n_mels=N_MELS, f_min=F_MIN, f_max=F_MAX, power=2.0, center=False
+        )
+        amplog = torchaudio.transforms.AmplitudeToDB()
+        return mel, amplog, hop_length
+
+    @torch.no_grad()
+    def _a2p_predict(self, audio_path: str, fps: int, win_T: int, device: str, init_pose: torch.Tensor | None):
+        """
+        Returns:
+          pose_seq: torch.FloatTensor [T_out, 2, 21, 2] in [0,1]
+        """
+        assert self.a2p_model is not None, "a2p_model is None (pass it to pipeline __init__)."
+
+        # 1) audio -> mel (same as training)
+        mel, amplog, hop_length = self._build_mel(fps)
+        wav, sr = torchaudio.load(audio_path)
+        if sr != SAMPLE_RATE:
+            wav = torchaudio.functional.resample(wav, sr, SAMPLE_RATE)
+        wav = wav.mean(0, keepdim=True)
+        m = amplog(mel(wav)).squeeze(0).transpose(0, 1).contiguous()  # [Tm,80]
+        m = torch.nan_to_num(m, neginf=-80.0, posinf=0.0)
+
+        Tm = m.shape[0]
+        if Tm < win_T:
+            raise RuntimeError(f"Audio too short: mel frames {Tm} < win_T {win_T}")
+
+        center = win_T // 2
+        preds = []
+        centers = []
+
+        # init pose usage: self.a2p_model(use_init_pose may be set in ckpt)
+        prev_pose = init_pose  # [1,2,21,2] or None
+
+        for t0 in range(0, Tm - win_T + 1):
+            clip = m[t0:t0 + win_T].unsqueeze(0).to(device)  # [1,win_T,80]
+
+            if prev_pose is not None:
+                out = self.a2p_model(clip, init_pose=prev_pose)  # [1,win_T,2,21,2]
+            else:
+                out = self.a2p_model(clip)
+
+            mid = out[0, center].clamp(0, 1).detach().to("cpu")  # [2,21,2]
+            preds.append(mid)
+            centers.append(t0 + center)
+            prev_pose = mid.unsqueeze(0).to(device)  # bootstrap
+
+        preds = torch.stack(preds, dim=0)  # [Tc,2,21,2]
+        centers = torch.tensor(centers, dtype=torch.float32)  # [Tc]
+        t_sec_centers = centers * hop_length / SAMPLE_RATE
+
+        # 2) resample to exact fps timeline
+        dur_s = (Tm * hop_length) / SAMPLE_RATE
+        T_out = max(1, int(round(dur_s * fps)))
+        t_sec_out = torch.arange(T_out, dtype=torch.float32) / float(fps)
+
+        idx = torch.searchsorted(t_sec_centers, t_sec_out)
+        idx = torch.clamp(idx, 0, len(t_sec_centers) - 1)
+        left = torch.clamp(idx - 1, 0, len(t_sec_centers) - 1)
+        right = idx
+        choose_left = (t_sec_out - t_sec_centers[left]) <= (t_sec_centers[right] - t_sec_out)
+        final_idx = torch.where(choose_left, left, right)
+
+        pose_seq = preds[final_idx]  # [T_out,2,21,2]
+        return pose_seq
+
+    # ---------------------------------------------------------------
+    def extract_pose_from_image(self, ref_image, detector):
+        """
+        detector: DWposeDetector (or similar)
+        ref_image: uint8 numpy [H,W,3]
+        Returns: np.ndarray [2,21,2] normalized to [0,1]
+        """
+        H, W = ref_image.shape[:2]
+        pose_dict = detector(ref_image)  # dict with 'hands'
+        hands = pose_dict.get("hands", None)
+
+        if hands is None or not isinstance(hands, np.ndarray) or hands.shape != (2, 21, 2):
+            hands = np.zeros((2, 21, 2), dtype=np.float32)
+        else:
+            hands = hands.astype(np.float32) / np.array([W, H], dtype=np.float32)
+
+        return hands  # [2,21,2] in [0,1]
 
     # ---------------------------------------------------------------
     # These methods are optional helpers to reduce VRAM usage.
@@ -362,6 +463,8 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
             fps=25,
             audio_margin=2,
             start_idx=0,
+            use_init_pose=True,
+            detector=None,  # <-- optional pose extractor for first frame
             **kwargs,
     ):
         # Default height and width to unet
@@ -392,14 +495,59 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
             batch_size=batch_size,
             fusion_blocks="full",
         )
-
+        # (A) Prepare audio features
         whisper_feature = self.audio_guider.audio2feat(audio_path)
         whisper_chunks = self.audio_guider.feature2chunks(feature_array=whisper_feature, fps=fps)
         audio_frame_num = whisper_chunks.shape[0]
         audio_fea_final = torch.Tensor(whisper_chunks).to(dtype=self.vae.dtype, device=self.vae.device)
         audio_fea_final = audio_fea_final.unsqueeze(0)
 
-        video_length = min(video_length, audio_frame_num)
+        # (B) Init pose from static image
+        if use_init_pose and detector is not None:
+            np_img = np.array(ref_image)  # PIL.Image -> np.uint8 [H,W,3]
+            init_pose = self.extract_pose_from_image(np_img, detector)  # [2,21,2]
+            init_pose = torch.from_numpy(init_pose).unsqueeze(0).to(device)  # [1,2,21,2]
+        else:
+            init_pose = None
+
+        # (C) Run A2P to generate pose sequence (uses init_pose if available)
+        pose_seq = self._a2p_predict(
+            audio_path=audio_path,
+            fps=fps,
+            win_T=context_frames,
+            device=device,
+            init_pose=init_pose  # [1,2,21,2] or None
+        )  # [T,2,21,2]
+        # --- NEW: convert each frame of keypoints -> RGB pose image ---
+        pose_imgs = []
+        H, W = height, width
+        for t in range(pose_seq.shape[0]):
+            # pose_seq[t] is [2,21,2] (two hands)
+            left_hand = pose_seq[t, 0].cpu().numpy()  # [21,2]
+            right_hand = pose_seq[t, 1].cpu().numpy()  # [21,2]
+
+            pose_dict = {
+                "hands": [left_hand, right_hand],  # ✅ separate hands
+                "hands_score": [
+                    np.ones((21,), dtype=np.float32),  # dummy confidence scores
+                    np.ones((21,), dtype=np.float32),
+                ],
+                "bodies": {"candidate": [], "subset": [], "score": []},  # empty body
+                "faces": [],
+                "faces_score": []
+            }
+
+            img = draw_pose_select_v2(pose_dict, H, W)  # works now
+            tensor = torch.from_numpy(img).float() / 255.0
+            pose_imgs.append(tensor)
+
+        # Stack into [B,C,T,H,W]
+        poses_tensor = torch.stack(pose_imgs, dim=1).unsqueeze(0).to(device, dtype=self.vae.dtype)
+
+        video_length = min(video_length, poses_tensor.shape[2], audio_frame_num)
+
+        # (D) Encode poses
+        pose_enocder_tensor = self.pose_encoder(poses_tensor)
 
         num_channels_latents = self.denoising_unet.in_channels
         latents = self.prepare_latents_smooth(
@@ -413,9 +561,6 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
             generator,
             context_frames
         )
-
-        pose_enocder_tensor = self.pose_encoder(poses_tensor)
-
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
         # Prepare ref image latents
@@ -544,7 +689,6 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
             reference_control_writer.clear()
 
         print(f'Denoising time: {time.time() - t0:.2f}s')
-
 
         if interpolation_factor > 0:
             latents = self.interpolate_latents(latents, interpolation_factor, device)

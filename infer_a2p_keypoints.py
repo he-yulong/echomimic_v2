@@ -62,7 +62,7 @@ def predict_keypoints(
 
     # 1) model
     model = Audio2Pose.load_from_checkpoint(
-        ckpt_path, mode="keypoints", fps=fps, heat_hw=(256, 256)
+        ckpt_path, map_location=device
     ).to(device).eval()
 
     # 2) audio -> mels (same as training)
@@ -109,6 +109,95 @@ def predict_keypoints(
         left, right
     )
     kp_seq = preds[idx]  # [T_out,2,21,2] in [0,1]
+    return kp_seq, fps
+
+
+@torch.no_grad()
+def predict_keypoints_v2(
+        audio_path: str,
+        ckpt_path: str,
+        fps: int = 24,
+        win_T: int = 12,
+        device: str | None = None,
+        use_init_pose: bool = False,
+        init_src: str = "pred",
+        pose_file: str | None = None,  # to allow GT init if provided
+):
+    """
+    Returns:
+      kp_seq: np.ndarray [T_out, 2, 21, 2] in normalized [0,1] coords
+      out_fps: int (the video FPS you should render at, usually `fps`)
+    """
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+    model = Audio2Pose.load_from_checkpoint(ckpt_path, map_location=device).to(device).eval()
+
+    mel, amplog, hop_length, mel_fps = build_mel(fps)
+    wav, sr = torchaudio.load(audio_path)
+    if sr != SAMPLE_RATE:
+        wav = torchaudio.functional.resample(wav, sr, SAMPLE_RATE)
+    wav = wav.mean(0, keepdim=True)
+    m = amplog(mel(wav)).squeeze(0).transpose(0, 1).contiguous()
+    m = torch.nan_to_num(m, neginf=-80.0, posinf=0.0)
+
+    Tm = m.shape[0]
+    if Tm < win_T:
+        raise RuntimeError(f"Audio too short: mel frames {Tm} < win_T {win_T}")
+
+    # optional GT init
+    gt_seq = None
+    if use_init_pose and init_src == "gt" and pose_file:
+        gt_seq = load_gt_seq(pose_file)  # [T,2,21,2] in [0,1]
+
+    center = win_T // 2
+    preds, centers = [], []
+
+    prev_pose = None
+    if use_init_pose and init_src == "gt" and gt_seq is not None:
+        prev_pose = torch.from_numpy(gt_seq[0]).float().to(device)  # [2,21,2]
+
+    for t0 in range(0, Tm - win_T + 1):
+        clip = m[t0:t0 + win_T].unsqueeze(0).to(device)  # [1,win_T,80]
+
+        init_pose = None
+        if use_init_pose:
+            if init_src == "gt" and gt_seq is not None:
+                # use GT at the corresponding center frame when available, else fallback to previous
+                cidx = t0 + center
+                if 0 <= cidx < len(gt_seq):
+                    init_pose = torch.from_numpy(gt_seq[cidx]).float().to(device)  # [2,21,2]
+                elif prev_pose is not None:
+                    init_pose = prev_pose
+            elif init_src == "pred" and prev_pose is not None:
+                init_pose = prev_pose
+
+        if init_pose is not None:
+            out = model(clip, init_pose=init_pose.unsqueeze(0))  # [1,win_T,2,21,2]
+        else:
+            out = model(clip)
+
+        mid = out[0, center].clamp(0, 1).detach().cpu().numpy()  # [2,21,2]
+        preds.append(mid)
+        centers.append(t0 + center)
+        prev_pose = torch.from_numpy(mid).float().to(device)  # bootstrap for next step
+
+    preds = np.stack(preds, 0)  # [Tc,2,21,2]
+    centers = np.asarray(centers)  # [Tc]
+    t_sec_centers = centers * hop_length / SAMPLE_RATE
+
+    dur_s = (Tm * hop_length) / SAMPLE_RATE
+    T_out = max(1, int(round(dur_s * fps)))
+    t_sec_out = np.arange(T_out) / float(fps)
+
+    idx = np.searchsorted(t_sec_centers, t_sec_out, side="left")
+    idx = np.clip(idx, 0, len(t_sec_centers) - 1)
+    left = np.clip(idx - 1, 0, len(t_sec_centers) - 1)
+    right = idx
+    idx = np.where(
+        (t_sec_out - t_sec_centers[left]) <= (t_sec_centers[right] - t_sec_out),
+        left, right
+    )
+    kp_seq = preds[idx]
     return kp_seq, fps
 
 
@@ -186,7 +275,6 @@ def load_gt_seq(pose_file: str):
     return hands  # [T,2,21,2]
 
 
-
 def run(audio_path, ckpt_path, pose_file, out_video, fps=24, win_T=12, device=None):
     kp_seq, out_fps = predict_keypoints(audio_path, ckpt_path, fps=fps, win_T=win_T, device=device)
     save_keypoint_video(kp_seq, out_video, fps=out_fps, size=(512, 512), audio_path=audio_path)
@@ -197,7 +285,20 @@ def run(audio_path, ckpt_path, pose_file, out_video, fps=24, win_T=12, device=No
         out_gt = out_video.replace(".mp4", "_gt.mp4")
         save_keypoint_video(gt_seq, out_gt, fps=out_fps, size=(512, 512), audio_path=audio_path)
         print(f"saved gt: {out_gt}")
+def run_v2(audio_path, ckpt_path, pose_file, out_video, fps=24, win_T=12,
+        device=None, use_init_pose=False, init_src="pred"):
+    kp_seq, out_fps = predict_keypoints_v2(
+        audio_path, ckpt_path, fps=fps, win_T=win_T, device=device,
+        use_init_pose=use_init_pose, init_src=init_src, pose_file=pose_file
+    )
+    save_keypoint_video(kp_seq, out_video, fps=out_fps, size=(512, 512), audio_path=audio_path)
+    print(f"saved pred: {out_video}")
 
+    if pose_file is not None:
+        gt_seq = load_gt_seq(pose_file)
+        out_gt = out_video.replace(".mp4", "_gt.mp4")
+        save_keypoint_video(gt_seq, out_gt, fps=out_fps, size=(512, 512), audio_path=audio_path)
+        print(f"saved gt: {out_gt}")
 
 if __name__ == "__main__":
     import argparse
@@ -209,5 +310,12 @@ if __name__ == "__main__":
     ap.add_argument("--out", default="a2p_keypoints.mp4")
     ap.add_argument("--fps", type=int, default=24)
     ap.add_argument("--win_T", type=int, default=12)
+    ap.add_argument("--use_init_pose", action="store_true",
+                    help="Condition generator on previous/GT pose at inference")
+    ap.add_argument("--init_src", choices=["gt", "pred"], default="pred",
+                    help="If --use_init_pose: use first GT frame ('gt') or bootstrap from predictions ('pred').")
     args = ap.parse_args()
-    run(args.audio, args.ckpt, args.pose_file, args.out, fps=args.fps, win_T=args.win_T)
+    # run(args.audio, args.ckpt, args.pose_file, args.out, fps=args.fps, win_T=args.win_T)
+    run_v2(args.audio, args.ckpt, args.pose_file, args.out,
+        fps=args.fps, win_T=args.win_T,
+        use_init_pose=args.use_init_pose, init_src=args.init_src)
