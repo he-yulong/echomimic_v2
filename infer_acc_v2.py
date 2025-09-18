@@ -115,7 +115,8 @@ def main():
         # Run pipeline
         t0 = time.time()
         video = run_inference(pipe, ref_img_pil, inputs_dict["audio"], poses_tensor, args, generator, start_idx)
-        final_length = min(video.shape[2], poses_tensor.shape[2], args.L)
+        # final_length = min(video.shape[2], poses_tensor.shape[2], args.L)  # TODO: check
+        final_length = min(video.shape[2], args.L)
 
         video_sig = video[:, :, :final_length, :, :]
         tmp_path = save_silent_video(video_sig, save_name, args.fps)

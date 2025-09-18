@@ -289,7 +289,7 @@ def run_inference(pipe, ref_image, audio_path, poses_tensor, args, generator, st
     return pipe(
         ref_image,
         audio_path,
-        poses_tensor[:, :, :args.L, ...],
+        None if poses_tensor is None else poses_tensor[:, :, :args.L, ...],
         args.W,
         args.H,
         args.L,
