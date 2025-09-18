@@ -15,7 +15,7 @@ from src.models.unet_2d_condition import UNet2DConditionModel
 from src.models.unet_3d_emo import EMOUNet3DConditionModel
 from src.models.whisper.audio2feature import load_audio_model
 from src.pipelines.pipeline_echomimicv2 import EchoMimicV2Pipeline as BasePipe
-from src.pipelines.pipeline_echomimicv2_acc import EchoMimicV2Pipeline as AccPipe
+from src.pipelines.pipeline_echomimicv2_acc_v2 import EchoMimicV2Pipeline as AccPipe
 from src.utils.util import save_videos_grid
 from src.models.pose_encoder import PoseEncoder
 from src.utils.dwpose_util import draw_pose_select_v2

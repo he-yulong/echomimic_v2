@@ -19,7 +19,7 @@ elif ffmpeg_path not in os.getenv('PATH'):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="./configs/prompts/infer_acc.yaml")
+    parser.add_argument("--config", type=str, default="./configs/prompts/infer_acc_v2.yaml")
     parser.add_argument("-W", type=int, default=768)
     parser.add_argument("-H", type=int, default=768)
     parser.add_argument("-L", type=int, default=240)

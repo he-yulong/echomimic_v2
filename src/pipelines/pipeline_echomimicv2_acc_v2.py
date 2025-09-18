@@ -1,9 +1,10 @@
-# pipeline_echomimicv2_acc.py
+# pipeline_echomimicv2_acc_v2.py
 import inspect
 import math
+import time
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Union
-
+from tqdm import tqdm
 import numpy as np
 import torch
 from diffusers import DiffusionPipeline
@@ -19,12 +20,12 @@ from diffusers.schedulers import (
 from diffusers.utils import BaseOutput, is_accelerate_available
 from diffusers.utils.torch_utils import randn_tensor
 from einops import rearrange
-from tqdm import tqdm
 
 from src.models.mutual_self_attention import ReferenceAttentionControl
 from src.pipelines.context import get_context_scheduler
 from src.pipelines.utils import get_tensor_interpolation_method
 from src.pipelines.step_func import origin_by_velocity_and_sample, psuedo_velocity_wrt_noisy_and_timestep
+
 
 @dataclass
 class EchoMimicV2PipelineOutput(BaseOutput):
@@ -33,27 +34,31 @@ class EchoMimicV2PipelineOutput(BaseOutput):
 
 class EchoMimicV2Pipeline(DiffusionPipeline):
 
-    def __init__(
-        self,
-        vae,
-        reference_unet,
-        denoising_unet,
-        audio_guider,
-        pose_encoder,
-        scheduler: Union[
-            DDIMScheduler,
-            PNDMScheduler,
-            LMSDiscreteScheduler,
-            EulerDiscreteScheduler,
-            EulerAncestralDiscreteScheduler,
-            DPMSolverMultistepScheduler,
-        ],
-        image_proj_model=None,
-        tokenizer=None,
-        text_encoder=None,
-    ):
+    def __init__(self,
+                 vae,  # Variational Autoencoder → encodes/decodes images to/from latent space.
+                 reference_unet,
+                 # 2D UNet → extracts visual features from the reference image (keeps appearance consistent).
+                 denoising_unet,
+                 # 3D UNet → does the heavy lifting of denoising latent video conditioned on audio/pose.
+                 audio_guider,  # Whisper-like model that extracts audio features.
+                 pose_encoder,  # network to turn skeleton/pose images into conditioning features.
+                 # controls the timestep schedule for the diffusion process (e.g. DDIM, Euler).
+                 scheduler: Union[
+                     DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler, EulerDiscreteScheduler,
+                     EulerAncestralDiscreteScheduler, DPMSolverMultistepScheduler
+                 ],
+                 # (Optional) image_proj_model, tokenizer, text_encoder → placeholders for multimodal/text conditioning, but not used here.
+                 image_proj_model=None,
+                 tokenizer=None,
+                 text_encoder=None,
+                 ):
+        # Calls the parent class DiffusionPipeline constructor (from HuggingFace diffusers).
+        # This gives the pipeline access to things like .to(device), .save_pretrained(), .from_pretrained(), etc.
         super().__init__()
-
+        # Registers all the passed-in models (vae, unet, etc.) as submodules inside the pipeline.
+        # That means:
+        # 1. They get moved automatically when you do pipe.to("cuda", dtype=torch.float16).
+        # 2. They can be saved/loaded cleanly with pipe.save_pretrained() and pipe.from_pretrained(). (HuggingFace pipeline framework)
         self.register_modules(
             vae=vae,
             reference_unet=reference_unet,
@@ -64,57 +69,92 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
             image_proj_model=image_proj_model,
             tokenizer=tokenizer,
             text_encoder=text_encoder,
-            # audio_feature_mapper=audio_feature_mapper
         )
+        # So 2 ** (...) = total downsampling factor.
+        # [128, 256, 512, 512] -> 2 ** (4 - 1) = 8
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        # Converts reference images into the right format before sending them into the VAE.
+        # Handles resizing, normalization, RGB conversion.
+        # Ensures the input image aligns with the VAE scale factor.
         self.ref_image_processor = VaeImageProcessor(
             vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True
         )
 
+    # ---------------------------------------------------------------
+    # These methods are optional helpers to reduce VRAM usage.
     def enable_vae_slicing(self):
         self.vae.enable_slicing()
 
     def disable_vae_slicing(self):
         self.vae.disable_slicing()
 
-    def enable_sequential_cpu_offload(self, gpu_id=0):
+    def enable_sequential_cpu_offload(self, gpu_id: Optional[int] = None, device: Union[torch.device, str] = "cuda"):
         if is_accelerate_available():
             from accelerate import cpu_offload
         else:
             raise ImportError("Please install accelerate via `pip install accelerate`")
-
-        device = torch.device(f"cuda:{gpu_id}")
-
         for cpu_offloaded_model in [self.unet, self.text_encoder, self.vae]:
             if cpu_offloaded_model is not None:
                 cpu_offload(cpu_offloaded_model, device)
 
     @property
     def _execution_device(self):
+        """
+        Figure out which device the UNet (main model) is actually running on.
+
+        - Normally, this is just `self.device`.
+        - But if HuggingFace Accelerate is offloading modules (CPU <-> GPU),
+          the real execution device might differ.
+        """
+        # If the pipeline is fully on a real device (not 'meta') and no HF hook, use self.device
         if self.device != torch.device("meta") or not hasattr(self.unet, "_hf_hook"):
             return self.device
+        # Otherwise, try to find the actual execution device from UNet modules
         for module in self.unet.modules():
-            if (
-                hasattr(module, "_hf_hook")
-                and hasattr(module._hf_hook, "execution_device")
-                and module._hf_hook.execution_device is not None
-            ):
+            if (hasattr(module, "_hf_hook") and hasattr(module._hf_hook, "execution_device") and
+                    module._hf_hook.execution_device is not None):
                 return torch.device(module._hf_hook.execution_device)
+        # Fallback: just return the pipeline's main device
         return self.device
 
-    def decode_latents(self, latents):
-        video_length = latents.shape[2]
-        latents = 1 / 0.18215 * latents
+    # ---------------------------------------------------------------
+    # turns the noisy latent tensors back into real video frames
+    def decode_latents(self, latents, chunk_size=1):
+        """
+        Decode latent video tensors back into pixel video frames using the VAE.
+        Optimized: all frames are decoded in one batch instead of a slow loop.
+        Args:
+            latents (torch.Tensor): [batch, channels, frames, height, width] latent video tensor.
+        Returns:
+            np.ndarray: Decoded video in [batch, channels, frames, height, width], values in [0,1].
+        """
+        batch_size, _, num_frames, _, _ = latents.shape
+        # Step 1. Rescale latents for VAE
+        # TODO: what is this magic number?
+        latents = latents / 0.18215
+        # Step 2. Flatten frames so VAE sees them as individual images
         latents = rearrange(latents, "b c f h w -> (b f) c h w")
-        video = []
-        for frame_idx in tqdm(range(latents.shape[0])):
-            video.append(self.vae.decode(latents[frame_idx : frame_idx + 1]).sample)
-        video = torch.cat(video)
-        video = rearrange(video, "(b f) c h w -> b c f h w", f=video_length)
+        # Step 3. Decode ALL frames at once (batch mode)
+        # decoded_frames = []
+        #         # for i in tqdm(range(latents.shape[0]), desc="Decoding frames"):
+        #         #     frame = self.vae.decode(latents[i:i + 1]).sample  # decode one frame
+        #         #     decoded_frames.append(frame)
+        #         # decoded = torch.cat(decoded_frames)
+        decoded_chunks = []
+        for i in range(0, latents.shape[0], chunk_size):
+            chunk = latents[i: i + chunk_size]
+            decoded = self.vae.decode(chunk).sample
+            decoded_chunks.append(decoded)
+            torch.cuda.empty_cache()  # free between chunks
+
+        decoded = torch.cat(decoded_chunks, dim=0)
+        # Step 4. Reshape back into video tensor
+        video = rearrange(decoded, "(b f) c h w -> b c f h w", b=batch_size, f=num_frames)
+        # Step 5. Normalize to [0,1]
         video = (video / 2 + 0.5).clamp(0, 1)
+        # Step 6. Convert to numpy float32
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
-        video = video.cpu().float().numpy()
-        return video
+        return video.cpu().float().numpy()
 
     def prepare_extra_step_kwargs(self, generator, eta):
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
@@ -138,16 +178,16 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
         return extra_step_kwargs
 
     def prepare_latents_bp(
-        self,
-        batch_size,
-        num_channels_latents,
-        width,
-        height,
-        video_length,
-        dtype,
-        device,
-        generator,
-        latents=None,
+            self,
+            batch_size,
+            num_channels_latents,
+            width,
+            height,
+            video_length,
+            dtype,
+            device,
+            generator,
+            latents=None,
     ):
         shape = (
             batch_size,
@@ -174,16 +214,16 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
         return latents
 
     def prepare_latents(
-        self,
-        batch_size,
-        num_channels_latents,
-        width,
-        height,
-        video_length,
-        dtype,
-        device,
-        generator,
-        context_frame_length
+            self,
+            batch_size,
+            num_channels_latents,
+            width,
+            height,
+            video_length,
+            dtype,
+            device,
+            generator,
+            context_frame_length
     ):
         shape = (
             batch_size,
@@ -204,23 +244,23 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
             shape, generator=generator, device=device, dtype=dtype
         )
         latents = latents_seg
-        
+
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
         print(f"latents shape:{latents.shape}, video_length:{video_length}")
         return latents
 
     def prepare_latents_smooth(
-        self,
-        batch_size,
-        num_channels_latents,
-        width,
-        height,
-        video_length,
-        dtype,
-        device,
-        generator,
-        context_frame_length
+            self,
+            batch_size,
+            num_channels_latents,
+            width,
+            height,
+            video_length,
+            dtype,
+            device,
+            generator,
+            context_frame_length
     ):
         shape = (
             batch_size,
@@ -240,19 +280,17 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
         latents_seg = randn_tensor(
             shape, generator=generator, device=device, dtype=dtype
         )
-        
-        latents = torch.clamp(latents_seg, -1.5, 1.5)
 
+        latents = torch.clamp(latents_seg, -1.5, 1.5)
 
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
         print(f"latents shape:{latents.shape}, video_length:{video_length}")
-        
+
         return latents
 
-
     def interpolate_latents(
-        self, latents: torch.Tensor, interpolation_factor: int, device
+            self, latents: torch.Tensor, interpolation_factor: int, device
     ):
         if interpolation_factor < 2:
             return latents
@@ -298,33 +336,33 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
 
     @torch.no_grad()
     def __call__(
-        self,
-        ref_image,
-        audio_path,
-        poses_tensor,
-        width,
-        height,
-        video_length,
-        num_inference_steps,
-        guidance_scale,
-        num_images_per_prompt=1,
-        eta: float = 0.0,
-        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        output_type: Optional[str] = "tensor",
-        return_dict: bool = True,
-        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
-        callback_steps: Optional[int] = 1,
-        context_schedule="uniform",
-        context_frames=12,
-        context_stride=1,
-        context_overlap=0,
-        context_batch_size=1,
-        interpolation_factor=1,
-        audio_sample_rate=16000,
-        fps=25,
-        audio_margin=2,
-        start_idx=0,
-        **kwargs,
+            self,
+            ref_image,
+            audio_path,
+            poses_tensor,
+            width,
+            height,
+            video_length,
+            num_inference_steps,
+            guidance_scale,
+            num_images_per_prompt=1,
+            eta: float = 0.0,
+            generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+            output_type: Optional[str] = "tensor",
+            return_dict: bool = True,
+            callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+            callback_steps: Optional[int] = 1,
+            context_schedule="uniform",
+            context_frames=12,
+            context_stride=1,
+            context_overlap=0,
+            context_batch_size=1,
+            interpolation_factor=1,
+            audio_sample_rate=16000,
+            fps=25,
+            audio_margin=2,
+            start_idx=0,
+            **kwargs,
     ):
         # Default height and width to unet
         height = height or self.unet.config.sample_size * self.vae_scale_factor
@@ -360,9 +398,9 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
         audio_frame_num = whisper_chunks.shape[0]
         audio_fea_final = torch.Tensor(whisper_chunks).to(dtype=self.vae.dtype, device=self.vae.device)
         audio_fea_final = audio_fea_final.unsqueeze(0)
-        
+
         video_length = min(video_length, audio_frame_num)
-        
+
         num_channels_latents = self.denoising_unet.in_channels
         latents = self.prepare_latents_smooth(
             batch_size * num_images_per_prompt,
@@ -375,9 +413,9 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
             generator,
             context_frames
         )
-        
+
         pose_enocder_tensor = self.pose_encoder(poses_tensor)
-        
+
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
         # Prepare ref image latents
@@ -404,7 +442,8 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
                 context_overlap,
             )
         )
-     
+
+        t0 = time.time()
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for t_i, t in enumerate(timesteps):
                 noise_pred = torch.zeros(
@@ -429,8 +468,8 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
                         encoder_hidden_states=None,
                         return_dict=False,
                     )
-                    reference_control_reader.update(reference_control_writer, do_classifier_free_guidance=do_classifier_free_guidance)
-
+                    reference_control_reader.update(reference_control_writer,
+                                                    do_classifier_free_guidance=do_classifier_free_guidance)
 
                 num_context_batches = math.ceil(len(context_queue) / context_batch_size)
 
@@ -438,7 +477,7 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
                 for j in range(num_context_batches):
                     global_context.append(
                         context_queue[
-                            j * context_batch_size : (j + 1) * context_batch_size
+                        j * context_batch_size: (j + 1) * context_batch_size
                         ]
                     )
 
@@ -448,7 +487,6 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
                     for c_j in range(len(context)):
                         for c_i in range(len(context[c_j])):
                             new_context[c_j][c_i] = (context[c_j][c_i] + t_i * 3) % video_length
-        
 
                     latent_model_input = (
                         torch.cat([latents[:, :, c] for c in new_context])
@@ -457,16 +495,16 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
                     )
 
                     audio_latents_cond = torch.cat([audio_fea_final[:, c] for c in new_context]).to(device)
-                                        
+
                     audio_latents = torch.cat([torch.zeros_like(audio_latents_cond), audio_latents_cond], 0)
                     pose_latents_cond = torch.cat([pose_enocder_tensor[:, :, c] for c in new_context]).to(device)
                     pose_latents = torch.cat([torch.zeros_like(pose_latents_cond), pose_latents_cond], 0)
-                    
+
                     latent_model_input = self.scheduler.scale_model_input(
                         latent_model_input, t
                     )
                     b, c, f, h, w = latent_model_input.shape
-                    
+
                     pred = self.denoising_unet(
                         latent_model_input,
                         t,
@@ -478,7 +516,8 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
 
                     alphas_cumprod = self.scheduler.alphas_cumprod.to(latent_model_input.device)
                     x_pred = origin_by_velocity_and_sample(pred, latent_model_input, alphas_cumprod, t)
-                    pred = psuedo_velocity_wrt_noisy_and_timestep(latent_model_input, x_pred, alphas_cumprod, t, torch.ones_like(t) * (-1))
+                    pred = psuedo_velocity_wrt_noisy_and_timestep(latent_model_input, x_pred, alphas_cumprod, t,
+                                                                  torch.ones_like(t) * (-1))
 
                     for j, c in enumerate(new_context):
                         noise_pred[:, :, c] = noise_pred[:, :, c] + pred
@@ -488,7 +527,7 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
                 if do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = (noise_pred / counter).chunk(2)
                     noise_pred = noise_pred_uncond + guidance_scale * (
-                        noise_pred_text - noise_pred_uncond
+                            noise_pred_text - noise_pred_uncond
                     )
                 else:
                     noise_pred = noise_pred / counter
@@ -497,18 +536,32 @@ class EchoMimicV2Pipeline(DiffusionPipeline):
                 ).prev_sample
 
                 if t_i == len(timesteps) - 1 or (
-                    (t_i + 1) > num_warmup_steps and (t_i + 1) % self.scheduler.order == 0
+                        (t_i + 1) > num_warmup_steps and (t_i + 1) % self.scheduler.order == 0
                 ):
                     progress_bar.update()
 
             reference_control_reader.clear()
             reference_control_writer.clear()
 
+        print(f'Denoising time: {time.time() - t0:.2f}s')
+
+
         if interpolation_factor > 0:
             latents = self.interpolate_latents(latents, interpolation_factor, device)
-        # Post-processing
-        images = self.decode_latents(latents)  # (b, c, f, h, w)
+        # TODO: try self.enable_sequential_cpu_offload()
+        # Before decode
+        self.denoising_unet.to("cpu")
+        self.reference_unet.to("cpu")
+        self.pose_encoder.to("cpu")
+        self.audio_guider.to("cpu")
 
+        torch.cuda.empty_cache()  # release VRAM back to CUDA allocator
+
+        # Post-processing
+        t0 = time.time()
+        images = self.decode_latents(latents)  # (b, c, f, h, w)
+        print(f'Decoding latents time: {time.time() - t0:.2f}s')
+        print(f"Final video shape: {images.shape}, dtype: {images.dtype}, min: {images.min()}, max: {images.max()}")
         # Convert to tensor
         if output_type == "tensor":
             images = torch.from_numpy(images)
